@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <mutex>
 
-#define SERVER_IP "192.168.100.114"
+#define SERVER_IP "192.168.1.1"
 #define SERVER_UDP_PORT 9000
 
 // === Logger ===

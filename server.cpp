@@ -11,10 +11,9 @@
 #include <fstream>
 #include <stdexcept>
 
-#define SERVER_UDP_PORT 9000
+#define SERVER_TCP_PORT 9000
 
 // === Logger ===
-
 class Logger {
 private:
     std::fstream file;
@@ -24,7 +23,6 @@ public:
     Logger(const std::string& filename = "log.txt") {
         file.open(filename, std::ios::in | std::ios::out | std::ios::app);
         if (!file.is_open()) {
-            // Создаем файл, если не существует
             file.clear();
             file.open(filename, std::ios::out);
             file.close();
@@ -35,7 +33,6 @@ public:
     ~Logger() {
         if (file.is_open()) file.close();
     }
-
     void write(const std::string& logLine) {
         std::unique_lock lock(mutex);
         file.clear();
@@ -43,29 +40,22 @@ public:
         file << logLine << std::endl;
         file.flush();
     }
-
-    std::string readLine() {
-        std::shared_lock lock(mutex);
-        file.clear();
-        file.seekg(0, std::ios::beg);
-        std::string line;
-        if (std::getline(file, line)) return line;
-        return "";
-    }
 };
 
 Logger logger;
 
-// ===
-
+// === Client Info ===
 struct ClientInfo {
+    int sockfd;
     sockaddr_in addr;
 };
 
-std::map<std::string, ClientInfo> clients;
+std::map<std::string, ClientInfo> clients;  // username -> ClientInfo
 std::mutex clients_mutex;
 
 MYSQL* conn;
+
+// === DB helpers ===
 
 std::string escapeString(const std::string& input) {
     std::string output;
@@ -134,7 +124,9 @@ bool registerUser(const std::string& user, const std::string& pass) {
     return true;
 }
 
-void handlePacket(int sockfd, std::string data, sockaddr_in client_addr) {
+// === Message handling ===
+
+void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in clientAddr) {
     if (data.rfind("REGISTER:", 0) == 0) {
         auto body = data.substr(9);
         auto sep = body.find(':');
@@ -143,8 +135,8 @@ void handlePacket(int sockfd, std::string data, sockaddr_in client_addr) {
         std::string pass = body.substr(sep + 1);
 
         bool success = registerUser(user, pass);
-        std::string reply = success ? "REGISTER_OK" : "REGISTER_FAIL";
-        sendto(sockfd, reply.c_str(), reply.size(), 0, (sockaddr*)&client_addr, sizeof(client_addr));
+        std::string reply = success ? "REGISTER_OK\n" : "REGISTER_FAIL\n";
+        send(clientSock, reply.c_str(), reply.size(), 0);
 
         logger.write("REGISTER " + user + " : " + (success ? "SUCCESS" : "FAIL"));
     }
@@ -156,14 +148,16 @@ void handlePacket(int sockfd, std::string data, sockaddr_in client_addr) {
         std::string pass = body.substr(sep + 1);
 
         if (validateLogin(user, pass)) {
-            std::lock_guard<std::mutex> lock(clients_mutex);
-            clients[user] = ClientInfo{client_addr};
-            std::string reply = "LOGIN_OK";
-            sendto(sockfd, reply.c_str(), reply.size(), 0, (sockaddr*)&client_addr, sizeof(client_addr));
+            {
+                std::lock_guard<std::mutex> lock(clients_mutex);
+                clients[user] = ClientInfo{clientSock, clientAddr};
+            }
+            std::string reply = "LOGIN_OK\n";
+            send(clientSock, reply.c_str(), reply.size(), 0);
             logger.write("LOGIN " + user + " : SUCCESS");
         } else {
-            std::string reply = "LOGIN_FAIL";
-            sendto(sockfd, reply.c_str(), reply.size(), 0, (sockaddr*)&client_addr, sizeof(client_addr));
+            std::string reply = "LOGIN_FAIL\n";
+            send(clientSock, reply.c_str(), reply.size(), 0);
             logger.write("LOGIN " + user + " : FAIL");
         }
     }
@@ -177,8 +171,7 @@ void handlePacket(int sockfd, std::string data, sockaddr_in client_addr) {
         {
             std::lock_guard<std::mutex> lock(clients_mutex);
             for (auto& pair : clients) {
-                if (pair.second.addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
-                    pair.second.addr.sin_port == client_addr.sin_port) {
+                if (pair.second.sockfd == clientSock) {
                     sender = pair.first;
                     break;
                 }
@@ -191,17 +184,54 @@ void handlePacket(int sockfd, std::string data, sockaddr_in client_addr) {
 
         std::lock_guard<std::mutex> lock(clients_mutex);
         if (clients.count(receiver)) {
-            std::string out = "FROM:" + sender + ":" + message;
-            sendto(sockfd, out.c_str(), out.size(), 0, (sockaddr*)&clients[receiver].addr, sizeof(sockaddr_in));
+            std::string out = "FROM:" + sender + ":" + message + "\n";
+            send(clients[receiver].sockfd, out.c_str(), out.size(), 0);
             logger.write("Sent to " + receiver + ": " + message);
         }
     }
 }
 
+// === Client handler ===
+
+void handleClient(int clientSock, sockaddr_in clientAddr) {
+    char buffer[1024];
+    std::string partialMsg;
+
+    while (true) {
+        ssize_t len = recv(clientSock, buffer, sizeof(buffer) - 1, 0);
+        if (len <= 0) break;  // клиент отключился или ошибка
+        buffer[len] = '\0';
+        partialMsg += buffer;
+
+        // Обработка сообщений, разделенных '\n'
+        size_t pos;
+        while ((pos = partialMsg.find('\n')) != std::string::npos) {
+            std::string msg = partialMsg.substr(0, pos);
+            partialMsg.erase(0, pos + 1);
+            handlePacketTCP(clientSock, msg, clientAddr);
+        }
+    }
+
+    // Удаляем клиента при отключении
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex);
+        for (auto it = clients.begin(); it != clients.end(); ++it) {
+            if (it->second.sockfd == clientSock) {
+                logger.write("Client disconnected: " + it->first);
+                clients.erase(it);
+                break;
+            }
+        }
+    }
+    close(clientSock);
+}
+
+// === main ===
+
 int main() {
     if (!connectToDB()) return 1;
 
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket");
         return 1;
@@ -209,7 +239,7 @@ int main() {
 
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(SERVER_UDP_PORT);
+    serverAddr.sin_port = htons(SERVER_TCP_PORT);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(sockfd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
@@ -218,17 +248,24 @@ int main() {
         return 1;
     }
 
-    std::cout << "UDP Server started on port " << SERVER_UDP_PORT << "\n";
+    if (listen(sockfd, SOMAXCONN) < 0) {
+        perror("listen");
+        close(sockfd);
+        return 1;
+    }
+
+    std::cout << "TCP Server started on port " << SERVER_TCP_PORT << "\n";
 
     while (true) {
-        char buffer[1024];
         sockaddr_in clientAddr{};
         socklen_t clientLen = sizeof(clientAddr);
-        ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer)-1, 0, (sockaddr*)&clientAddr, &clientLen);
-        if (len < 0) continue;
-        buffer[len] = '\0';
-        std::string data(buffer);
-        std::thread(handlePacket, sockfd, data, clientAddr).detach();
+        int clientSock = accept(sockfd, (sockaddr*)&clientAddr, &clientLen);
+        if (clientSock < 0) {
+            perror("accept");
+            continue;
+        }
+
+        std::thread(handleClient, clientSock, clientAddr).detach();
     }
 
     close(sockfd);

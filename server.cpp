@@ -189,7 +189,81 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
             logger.write("Sent to " + receiver + ": " + message);
         }
     }
+    else if (data == "GET_USERS") {
+        std::lock_guard<std::mutex> lock(clients_mutex);
+        std::string usersList = "USERS:";
+        for (const auto& pair : clients) {
+            usersList += pair.first + ",";
+        }
+        if (!clients.empty())
+            usersList.pop_back(); // убрать последнюю запятую
+        usersList += "\n";
+        send(clientSock, usersList.c_str(), usersList.size(), 0);
+    }
+    else if (data == "GET_LOGS") {
+        std::ifstream logFile("log.txt");
+        if (!logFile.is_open()) {
+            std::string reply = "LOGS:ERROR_OPENING_LOG\n";
+            send(clientSock, reply.c_str(), reply.size(), 0);
+        } else {
+            std::string logs = "LOGS:";
+            std::string line;
+            bool first = true;
+            while (std::getline(logFile, line)) {
+                if (!first) logs += "|";
+                logs += line;
+                first = false;
+            }
+            logs += "\n";
+            send(clientSock, logs.c_str(), logs.size(), 0);
+        }
+    }
+    else if (data.rfind("BAN:", 0) == 0) {
+        std::string username = data.substr(4);
+        bool banned = false;
+
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            auto it = clients.find(username);
+            if (it != clients.end()) {
+                close(it->second.sockfd);
+                clients.erase(it);
+                banned = true;
+            }
+        }
+
+        // TODO: Можно добавить пометку banned в БД
+        // std::string q = "UPDATE users SET banned=1 WHERE username='" + escapeString(username) + "'";
+        // mysql_query(conn, q.c_str());
+
+        std::string reply = banned ? "RESULT:BAN_OK\n" : "RESULT:BAN_FAIL\n";
+        send(clientSock, reply.c_str(), reply.size(), 0);
+        logger.write("BAN command for user " + username + " : " + (banned ? "SUCCESS" : "FAIL"));
+    }
+    else if (data.rfind("DISCONNECT:", 0) == 0) {
+        std::string username = data.substr(11);
+        bool disconnected = false;
+
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            auto it = clients.find(username);
+            if (it != clients.end()) {
+                close(it->second.sockfd);
+                clients.erase(it);
+                disconnected = true;
+            }
+        }
+
+        std::string reply = disconnected ? "RESULT:DISCONNECT_OK\n" : "RESULT:DISCONNECT_FAIL\n";
+        send(clientSock, reply.c_str(), reply.size(), 0);
+        logger.write("DISCONNECT command for user " + username + " : " + (disconnected ? "SUCCESS" : "FAIL"));
+    }
+    else {
+        // Неизвестная команда — можно игнорировать или логировать
+        logger.write("Unknown command from socket " + std::to_string(clientSock) + ": " + data);
+    }
 }
+
 
 // === Client handler ===
 

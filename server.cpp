@@ -112,7 +112,16 @@ UserInfo validateLogin(const std::string& user, const std::string& pass) {
 }
 
 bool registerUser(const std::string& user, const std::string& pass) {
-    std::string query = "INSERT INTO users(username, password) VALUES('" + escapeString(user) + "', '" + escapeString(pass) + "')";
+    // Проверяем, есть ли уже админы
+    mysql_query(conn, "SELECT COUNT(*) FROM users WHERE is_admin = 1");
+    MYSQL_RES* res = mysql_store_result(conn);
+    MYSQL_ROW row = mysql_fetch_row(res);
+    bool isFirstAdmin = (std::stoi(row[0]) == 0);
+    mysql_free_result(res);
+
+    std::string query = "INSERT INTO users(username, password, is_admin) VALUES('" +
+        escapeString(user) + "', '" + escapeString(pass) + "', " + (isFirstAdmin ? "1" : "0") + ")";
+
     if (mysql_query(conn, query.c_str()) != 0) {
         std::cerr << "DB insert error: " << mysql_error(conn) << "\n";
         return false;

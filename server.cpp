@@ -194,7 +194,7 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
 
         saveMessageToDB(sender, receiver, message);
         //logger.write("MSG from " + sender + " to " + receiver + ": " + message);
-        saveMessageToFile(sender, reciever, message);
+        saveMessageToFile(sender, receiver, message);
 
         std::lock_guard<std::mutex> lock(clients_mutex);
         if (clients.count(receiver)) {

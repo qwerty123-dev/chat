@@ -14,36 +14,15 @@
 #define SERVER_TCP_PORT 9000
 
 // === Logger ===
-class Logger {
-private:
-    std::fstream file;
-    mutable std::shared_mutex mutex;
+std::mutex logFileMutex;
 
-public:
-    Logger(const std::string& filename = "log.txt") {
-        file.open(filename, std::ios::in | std::ios::out | std::ios::app);
-        if (!file.is_open()) {
-            file.clear();
-            file.open(filename, std::ios::out);
-            file.close();
-            file.open(filename, std::ios::in | std::ios::out | std::ios::app);
-            if (!file.is_open()) throw std::runtime_error("Cannot open log file");
-        }
-    }
-    ~Logger() {
-        if (file.is_open()) file.close();
-    }
-    void write(const std::string& logLine) {
-        std::unique_lock lock(mutex);
-        file.clear();
-        file.seekp(0, std::ios::end);
+void saveLogToFile(const std::string& logLine) {
+    std::lock_guard<std::mutex> lock(logFileMutex);
+    std::ofstream file("log.txt", std::ios::app);
+    if (file.is_open()) {
         file << logLine << std::endl;
-        file.flush();
     }
-};
-
-Logger logger;
-
+}
 
 // === Messages File ===
 std::mutex messageFileMutex;
@@ -151,7 +130,7 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
         std::string reply = success ? "REGISTER_OK\n" : "REGISTER_FAIL\n";
         send(clientSock, reply.c_str(), reply.size(), 0);
 
-        logger.write("REGISTER " + user + " : " + (success ? "SUCCESS" : "FAIL"));
+        saveLogToFile("REGISTER " + user + " : " + (success ? "SUCCESS" : "FAIL"));
     }
     else if (data.rfind("LOGIN:", 0) == 0) {
         auto body = data.substr(6);
@@ -167,11 +146,11 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
             }
             std::string reply = "LOGIN_OK\n";
             send(clientSock, reply.c_str(), reply.size(), 0);
-            logger.write("LOGIN " + user + " : SUCCESS");
+            saveLogToFile("LOGIN " + user + " : SUCCESS");
         } else {
             std::string reply = "LOGIN_FAIL\n";
             send(clientSock, reply.c_str(), reply.size(), 0);
-            logger.write("LOGIN " + user + " : FAIL");
+            saveLogToFile("LOGIN " + user + " : FAIL");
         }
     }
     else if (data.rfind("MSG:", 0) == 0) {
@@ -194,7 +173,7 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
 
         saveMessageToDB(sender, receiver, message);
         //logger.write("MSG from " + sender + " to " + receiver + ": " + message);
-        saveMessageToFile(sender, receiver, message);
+        saveMessageToFile(sender, reciever, message);
 
         std::lock_guard<std::mutex> lock(clients_mutex);
         if (clients.count(receiver)) {
@@ -269,7 +248,7 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
 
         std::string reply = banned ? "RESULT:BAN_OK\n" : "RESULT:BAN_FAIL\n";
         send(clientSock, reply.c_str(), reply.size(), 0);
-        logger.write("BAN command for user " + username + " : " + (banned ? "SUCCESS" : "FAIL"));
+        saveLogToFile("BAN command for user " + username + " : " + (banned ? "SUCCESS" : "FAIL"));
     }
     else if (data.rfind("DISCONNECT:", 0) == 0) {
         std::string username = data.substr(11);
@@ -287,11 +266,11 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
 
         std::string reply = disconnected ? "RESULT:DISCONNECT_OK\n" : "RESULT:DISCONNECT_FAIL\n";
         send(clientSock, reply.c_str(), reply.size(), 0);
-        logger.write("DISCONNECT command for user " + username + " : " + (disconnected ? "SUCCESS" : "FAIL"));
+        saveLogToFile("DISCONNECT command for user " + username + " : " + (disconnected ? "SUCCESS" : "FAIL"));
     } 
     else {
         // Неизвестная команда — можно игнорировать или логировать
-        logger.write("Unknown command from socket " + std::to_string(clientSock) + ": " + data);
+        saveLogToFile("Unknown command from socket " + std::to_string(clientSock) + ": " + data);
     }
 }
 
@@ -322,7 +301,7 @@ void handleClient(int clientSock, sockaddr_in clientAddr) {
         std::lock_guard<std::mutex> lock(clients_mutex);
         for (auto it = clients.begin(); it != clients.end(); ++it) {
             if (it->second.sockfd == clientSock) {
-                logger.write("Client disconnected: " + it->first);
+                saveLogToFile("Client disconnected: " + it->first);
                 clients.erase(it);
                 break;
             }

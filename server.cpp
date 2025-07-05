@@ -1,12 +1,15 @@
 #include <iostream>
 #include <thread>
 #include <mutex>
+#include <shared_mutex>
 #include <map>
 #include <string>
-#include <fstream>
+#include <cstring>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <mysql/mysql.h>
+#include <fstream>
+#include <stdexcept>
 
 #define SERVER_TCP_PORT 9000
 
@@ -24,11 +27,12 @@ void saveLogToFile(const std::string& logLine) {
 // === Messages File ===
 std::mutex messageFileMutex;
 
-void saveMessageToFile(const std::string& sender, const std::string& receiver, const std::string& message) {
+void saveMessageToFile(const std::string& sender, const std::string& reciever, const std::string& message)
+{
     std::lock_guard<std::mutex> lock(messageFileMutex);
     std::ofstream file("messages.txt", std::ios::app);
-    if (file.is_open()) {
-        file << sender << " -> " << receiver << " : " << message << "\n";
+    if(file.is_open()) {
+        file << sender << " -> " << reciever << " : " << message << "\n";
     }
 }
 
@@ -36,7 +40,6 @@ void saveMessageToFile(const std::string& sender, const std::string& receiver, c
 struct ClientInfo {
     int sockfd;
     sockaddr_in addr;
-    bool isAdmin;
 };
 
 std::map<std::string, ClientInfo> clients;  // username -> ClientInfo
@@ -70,8 +73,7 @@ bool connectToDB() {
 
     const char* createUsers = "CREATE TABLE IF NOT EXISTS users ("
                               "username VARCHAR(100) PRIMARY KEY,"
-                              "password VARCHAR(100),"
-                              "is_admin TINYINT(1) DEFAULT 0)";
+                              "password VARCHAR(100))";
 
     const char* createMessages = "CREATE TABLE IF NOT EXISTS messages ("
                                  "id INT AUTO_INCREMENT PRIMARY KEY,"
@@ -85,50 +87,6 @@ bool connectToDB() {
     return true;
 }
 
-// Структура результата проверки логина
-struct UserInfo {
-    bool valid;
-    bool isAdmin;
-};
-
-UserInfo validateLogin(const std::string& user, const std::string& pass) {
-    std::string query = "SELECT is_admin FROM users WHERE username='" + escapeString(user) +
-                        "' AND password='" + escapeString(pass) + "'";
-    if (mysql_query(conn, query.c_str()) != 0) {
-        std::cerr << "DB select error: " << mysql_error(conn) << "\n";
-        return {false, false};
-    }
-    MYSQL_RES* res = mysql_store_result(conn);
-    bool valid = mysql_num_rows(res) > 0;
-    bool isAdmin = false;
-    if (valid) {
-        MYSQL_ROW row = mysql_fetch_row(res);
-        if (row && row[0]) {
-            isAdmin = (std::stoi(row[0]) != 0);
-        }
-    }
-    mysql_free_result(res);
-    return {valid, isAdmin};
-}
-
-bool registerUser(const std::string& user, const std::string& pass) {
-    // Проверяем, есть ли уже админы
-    mysql_query(conn, "SELECT COUNT(*) FROM users WHERE is_admin = 1");
-    MYSQL_RES* res = mysql_store_result(conn);
-    MYSQL_ROW row = mysql_fetch_row(res);
-    bool isFirstAdmin = (std::stoi(row[0]) == 0);
-    mysql_free_result(res);
-
-    std::string query = "INSERT INTO users(username, password, is_admin) VALUES('" +
-        escapeString(user) + "', '" + escapeString(pass) + "', " + (isFirstAdmin ? "1" : "0") + ")";
-
-    if (mysql_query(conn, query.c_str()) != 0) {
-        std::cerr << "DB insert error: " << mysql_error(conn) << "\n";
-        return false;
-    }
-    return true;
-}
-
 void saveMessageToDB(const std::string& sender, const std::string& receiver, const std::string& text) {
     std::string query = "INSERT INTO messages(sender, receiver, text) VALUES('" +
                         escapeString(sender) + "', '" + escapeString(receiver) + "', '" + escapeString(text) + "')";
@@ -137,23 +95,30 @@ void saveMessageToDB(const std::string& sender, const std::string& receiver, con
     }
 }
 
+bool validateLogin(const std::string& user, const std::string& pass) {
+    std::string query = "SELECT * FROM users WHERE username='" + escapeString(user) + "' AND password='" + escapeString(pass) + "'";
+    if (mysql_query(conn, query.c_str()) != 0) {
+        std::cerr << "DB select error: " << mysql_error(conn) << "\n";
+        return false;
+    }
+    MYSQL_RES* res = mysql_store_result(conn);
+    bool valid = mysql_num_rows(res) > 0;
+    mysql_free_result(res);
+    return valid;
+}
+
+bool registerUser(const std::string& user, const std::string& pass) {
+    std::string query = "INSERT INTO users(username, password) VALUES('" + escapeString(user) + "', '" + escapeString(pass) + "')";
+    if (mysql_query(conn, query.c_str()) != 0) {
+        std::cerr << "DB insert error: " << mysql_error(conn) << "\n";
+        return false;
+    }
+    return true;
+}
+
 // === Message handling ===
 
 void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in clientAddr) {
-    // Получаем имя пользователя и права админа по сокету
-    std::string username;
-    bool isAdmin = false;
-    {
-        std::lock_guard<std::mutex> lock(clients_mutex);
-        for (const auto& pair : clients) {
-            if (pair.second.sockfd == clientSock) {
-                username = pair.first;
-                isAdmin = pair.second.isAdmin;
-                break;
-            }
-        }
-    }
-
     if (data.rfind("REGISTER:", 0) == 0) {
         auto body = data.substr(9);
         auto sep = body.find(':');
@@ -174,11 +139,10 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
         std::string user = body.substr(0, sep);
         std::string pass = body.substr(sep + 1);
 
-        UserInfo info = validateLogin(user, pass);
-        if (info.valid) {
+        if (validateLogin(user, pass)) {
             {
                 std::lock_guard<std::mutex> lock(clients_mutex);
-                clients[user] = ClientInfo{clientSock, clientAddr, info.isAdmin};
+                clients[user] = ClientInfo{clientSock, clientAddr};
             }
             std::string reply = "LOGIN_OK\n";
             send(clientSock, reply.c_str(), reply.size(), 0);
@@ -195,15 +159,27 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
         std::string receiver = data.substr(4, pos1 - 4);
         std::string message = data.substr(pos1 + 1);
 
-        if (username.empty()) return; // Неавторизованный клиент не может отправлять сообщения
+        std::string sender;
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            for (auto& pair : clients) {
+                if (pair.second.sockfd == clientSock) {
+                    sender = pair.first;
+                    break;
+                }
+            }
+        }
+        if (sender.empty()) return;
 
-        saveMessageToDB(username, receiver, message);
-        saveMessageToFile(username, receiver, message);
+        saveMessageToDB(sender, receiver, message);
+        //logger.write("MSG from " + sender + " to " + receiver + ": " + message);
+        saveMessageToFile(sender, receiver, message);
 
         std::lock_guard<std::mutex> lock(clients_mutex);
         if (clients.count(receiver)) {
-            std::string out = "FROM:" + username + ":" + message + "\n";
+            std::string out = "FROM:" + sender + ":" + message + "\n";
             send(clients[receiver].sockfd, out.c_str(), out.size(), 0);
+            //logger.write("Sent to " + receiver + ": " + message);
         }
     }
     else if (data == "GET_USERS") {
@@ -218,12 +194,6 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
         send(clientSock, usersList.c_str(), usersList.size(), 0);
     }
     else if (data == "GET_LOGS") {
-        if (!isAdmin) {
-            std::string reply = "ERROR: Not authorized\n";
-            send(clientSock, reply.c_str(), reply.size(), 0);
-            return;
-        }
-
         std::ifstream logFile("log.txt");
         if (!logFile.is_open()) {
             std::string reply = "LOGS:ERROR_OPENING_LOG\n";
@@ -240,38 +210,31 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
             logs += "\n";
             send(clientSock, logs.c_str(), logs.size(), 0);
         }
-    }
-    else if (data == "GET_MESSAGES") {
-        std::ifstream file("messages.txt");
-        if (!file.is_open()) {
-            std::string reply = "MESSAGES:ERROR_OPENING_FILE\n";
-            send(clientSock, reply.c_str(), reply.size(), 0);
-        } else {
-            std::string reply = "MESSAGES:";
-            std::string line;
-            bool first = true;
-            while (std::getline(file, line)) {
-                if (!first) reply += "|";  // Разделитель сообщений
-                reply += line;
-                first = false;
-            }
-            reply += "\n";
-            send(clientSock, reply.c_str(), reply.size(), 0);
+    } else if (data == "GET_MESSAGES") {
+           std::ifstream file("messages.txt");
+    if (!file.is_open()) {
+        std::string reply = "MESSAGES:ERROR_OPENING_FILE\n";
+        send(clientSock, reply.c_str(), reply.size(), 0);
+    } else {
+        std::string reply = "MESSAGES:";
+        std::string line;
+        bool first = true;
+        while (std::getline(file, line)) {
+            if (!first) reply += "|";  // Разделитель сообщений
+            reply += line;
+            first = false;
         }
+        reply += "\n";
+        send(clientSock, reply.c_str(), reply.size(), 0);
+    }
     }
     else if (data.rfind("BAN:", 0) == 0) {
-        if (!isAdmin) {
-            std::string reply = "ERROR: Not authorized\n";
-            send(clientSock, reply.c_str(), reply.size(), 0);
-            return;
-        }
-
-        std::string userToBan = data.substr(4);
+        std::string username = data.substr(4);
         bool banned = false;
 
         {
             std::lock_guard<std::mutex> lock(clients_mutex);
-            auto it = clients.find(userToBan);
+            auto it = clients.find(username);
             if (it != clients.end()) {
                 close(it->second.sockfd);
                 clients.erase(it);
@@ -279,19 +242,21 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
             }
         }
 
-        // TODO: Можно добавить пометку banned в БД, если нужно
+        // TODO: Можно добавить пометку banned в БД
+        // std::string q = "UPDATE users SET banned=1 WHERE username='" + escapeString(username) + "'";
+        // mysql_query(conn, q.c_str());
 
         std::string reply = banned ? "RESULT:BAN_OK\n" : "RESULT:BAN_FAIL\n";
         send(clientSock, reply.c_str(), reply.size(), 0);
-        saveLogToFile("BAN command for user " + userToBan + " : " + (banned ? "SUCCESS" : "FAIL"));
+        saveLogToFile("BAN command for user " + username + " : " + (banned ? "SUCCESS" : "FAIL"));
     }
     else if (data.rfind("DISCONNECT:", 0) == 0) {
-        std::string userToDisconnect = data.substr(11);
+        std::string username = data.substr(11);
         bool disconnected = false;
 
         {
             std::lock_guard<std::mutex> lock(clients_mutex);
-            auto it = clients.find(userToDisconnect);
+            auto it = clients.find(username);
             if (it != clients.end()) {
                 close(it->second.sockfd);
                 clients.erase(it);
@@ -301,50 +266,57 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
 
         std::string reply = disconnected ? "RESULT:DISCONNECT_OK\n" : "RESULT:DISCONNECT_FAIL\n";
         send(clientSock, reply.c_str(), reply.size(), 0);
-        saveLogToFile("DISCONNECT command for user " + userToDisconnect + " : " + (disconnected ? "SUCCESS" : "FAIL"));
-    }
+        saveLogToFile("DISCONNECT command for user " + username + " : " + (disconnected ? "SUCCESS" : "FAIL"));
+    } 
     else {
         // Неизвестная команда — можно игнорировать или логировать
         saveLogToFile("Unknown command from socket " + std::to_string(clientSock) + ": " + data);
     }
 }
 
+
 // === Client handler ===
 
 void handleClient(int clientSock, sockaddr_in clientAddr) {
-    char buffer[4096];
+    char buffer[1024];
+    std::string partialMsg;
+
     while (true) {
-        ssize_t received = recv(clientSock, buffer, sizeof(buffer) - 1, 0);
-        if (received <= 0) {
-            // Клиент отключился, очищаем данные
-            std::lock_guard<std::mutex> lock(clients_mutex);
-            for (auto it = clients.begin(); it != clients.end(); ++it) {
-                if (it->second.sockfd == clientSock) {
-                    close(clientSock);
-                    clients.erase(it);
-                    break;
-                }
-            }
-            break;
+        ssize_t len = recv(clientSock, buffer, sizeof(buffer) - 1, 0);
+        if (len <= 0) break;  // клиент отключился или ошибка
+        buffer[len] = '\0';
+        partialMsg += buffer;
+
+        // Обработка сообщений, разделенных '\n'
+        size_t pos;
+        while ((pos = partialMsg.find('\n')) != std::string::npos) {
+            std::string msg = partialMsg.substr(0, pos);
+            partialMsg.erase(0, pos + 1);
+            handlePacketTCP(clientSock, msg, clientAddr);
         }
-        buffer[received] = '\0';
-        std::string data(buffer);
-        // Обработка пакета
-        handlePacketTCP(clientSock, data, clientAddr);
+    }
+
+    // Удаляем клиента при отключении
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex);
+        for (auto it = clients.begin(); it != clients.end(); ++it) {
+            if (it->second.sockfd == clientSock) {
+                saveLogToFile("Client disconnected: " + it->first);
+                clients.erase(it);
+                break;
+            }
+        }
     }
     close(clientSock);
 }
 
-// === Main ===
+// === main ===
 
 int main() {
-    if (!connectToDB()) {
-        std::cerr << "DB connection failed. Exiting.\n";
-        return 1;
-    }
+    if (!connectToDB()) return 1;
 
-    int serverSock = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSock == -1) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
         perror("socket");
         return 1;
     }
@@ -354,34 +326,33 @@ int main() {
     serverAddr.sin_port = htons(SERVER_TCP_PORT);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
 
-    int opt = 1;
-    setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    if (bind(serverSock, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+    if (bind(sockfd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
         perror("bind");
+        close(sockfd);
         return 1;
     }
 
-    if (listen(serverSock, SOMAXCONN) < 0) {
+    if (listen(sockfd, SOMAXCONN) < 0) {
         perror("listen");
+        close(sockfd);
         return 1;
     }
 
-    std::cout << "Server started on port " << SERVER_TCP_PORT << std::endl;
+    std::cout << "TCP Server started on port " << SERVER_TCP_PORT << "\n";
 
     while (true) {
         sockaddr_in clientAddr{};
-        socklen_t clientAddrLen = sizeof(clientAddr);
-        int clientSock = accept(serverSock, (sockaddr*)&clientAddr, &clientAddrLen);
+        socklen_t clientLen = sizeof(clientAddr);
+        int clientSock = accept(sockfd, (sockaddr*)&clientAddr, &clientLen);
         if (clientSock < 0) {
             perror("accept");
             continue;
         }
 
-        std::thread clientThread(handleClient, clientSock, clientAddr);
-        clientThread.detach();
+        std::thread(handleClient, clientSock, clientAddr).detach();
     }
 
+    close(sockfd);
     mysql_close(conn);
     return 0;
 }

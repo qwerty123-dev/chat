@@ -44,6 +44,19 @@ public:
 
 Logger logger;
 
+
+// === Messages File ===
+std::mutex messageFileMutex;
+
+void saveMessageToFile(const std::string& sender, const std::string& reciever, const std::string& message)
+{
+    std::lock_guard<std::mutex> lock(messageFileMutex);
+    std::ofstream file("messages.txt", std::ios::app);
+    if(file.is_open()) {
+        file << sender << " -> " << reciever << " : " << message << "\n";
+    }
+}
+
 // === Client Info ===
 struct ClientInfo {
     int sockfd;
@@ -180,13 +193,14 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
         if (sender.empty()) return;
 
         saveMessageToDB(sender, receiver, message);
-        logger.write("MSG from " + sender + " to " + receiver + ": " + message);
+        //logger.write("MSG from " + sender + " to " + receiver + ": " + message);
+        saveMessageToFile(sender, reciever, message);
 
         std::lock_guard<std::mutex> lock(clients_mutex);
         if (clients.count(receiver)) {
             std::string out = "FROM:" + sender + ":" + message + "\n";
             send(clients[receiver].sockfd, out.c_str(), out.size(), 0);
-            logger.write("Sent to " + receiver + ": " + message);
+            //logger.write("Sent to " + receiver + ": " + message);
         }
     }
     else if (data == "GET_USERS") {
@@ -217,6 +231,23 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
             logs += "\n";
             send(clientSock, logs.c_str(), logs.size(), 0);
         }
+    } else if (data == "GET_MESSAGES") {
+           std::ifstream file("messages.txt");
+    if (!file.is_open()) {
+        std::string reply = "MESSAGES:ERROR_OPENING_FILE\n";
+        send(clientSock, reply.c_str(), reply.size(), 0);
+    } else {
+        std::string reply = "MESSAGES:";
+        std::string line;
+        bool first = true;
+        while (std::getline(file, line)) {
+            if (!first) reply += "|";  // Разделитель сообщений
+            reply += line;
+            first = false;
+        }
+        reply += "\n";
+        send(clientSock, reply.c_str(), reply.size(), 0);
+    }
     }
     else if (data.rfind("BAN:", 0) == 0) {
         std::string username = data.substr(4);
@@ -257,7 +288,7 @@ void handlePacketTCP(int clientSock, const std::string& data, sockaddr_in client
         std::string reply = disconnected ? "RESULT:DISCONNECT_OK\n" : "RESULT:DISCONNECT_FAIL\n";
         send(clientSock, reply.c_str(), reply.size(), 0);
         logger.write("DISCONNECT command for user " + username + " : " + (disconnected ? "SUCCESS" : "FAIL"));
-    }
+    } 
     else {
         // Неизвестная команда — можно игнорировать или логировать
         logger.write("Unknown command from socket " + std::to_string(clientSock) + ": " + data);

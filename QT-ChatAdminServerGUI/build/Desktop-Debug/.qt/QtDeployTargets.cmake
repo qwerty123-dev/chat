@@ -1,0 +1,2 @@
+set(__QT_DEPLOY_TARGET_QT-ChatAdminServerGUI_FILE /home/qwerty/QT-ChatAdminServerGUI/build/Desktop-Debug/QT-ChatAdminServerGUI)
+set(__QT_DEPLOY_TARGET_QT-ChatAdminServerGUI_TYPE EXECUTABLE)

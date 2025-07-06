@@ -9,7 +9,7 @@
 #include <mysql/mysql.h>
 #include <fstream>
 
-#define SERVER_TCP_PORT 9000
+#define SERVER_TCP_PORT 1234
 
 // === Логи ===
 std::mutex logFileMutex;

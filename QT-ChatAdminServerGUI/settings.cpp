@@ -1,8 +1,8 @@
 #include "settings.h"
 
 // Инициализация статических полей (значения по умолчанию)
-QString Settings::s_serverHost = "192.168.100.200";
-quint16 Settings::s_serverPort = 9000;
+QString Settings::s_serverHost = "127.0.0.1";
+quint16 Settings::s_serverPort = 1234;
 QString Settings::s_adminUser = "admin";
 QString Settings::s_adminPass = "1234";
 

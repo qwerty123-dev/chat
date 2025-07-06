@@ -27,7 +27,7 @@ MainWindow::~MainWindow()
 
 void MainWindow::on_connectButton_clicked()
 {
-    socket->connectToHost("192.168.100.200", 9000);
+    socket->connectToHost("127.0.0.1", 1234);
     if (!socket->waitForConnected(1000)) {
         QMessageBox::critical(this, "Connection", "Unable to connect to server.");
     } else {

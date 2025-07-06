@@ -1,4 +1,4 @@
-# QT Chat Server and Client with Admin GUI
+# Chat
 1. QT-ChatAdminServerGUI — административная панель для управления сервером и мониторинга
 2. QT-ChatClientGUI — клиентский интерфейс для регистрации, логина и общения
 3. TCPServer.cpp — исходный код TCP сервера на C++
